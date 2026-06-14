@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>タイマー</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { width: 100%; height: 100%; overflow: hidden; user-select: none; -webkit-user-select: none; }
+  body {
+    background: #000;
+    color: #fff;
+    font-family: 'Meiryo UI', 'Yu Gothic', sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    height: 100vh;
+    padding: 0 2vw;
+    transition: background 0.2s;
+  }
+  .display {
+    font-size: 28vh;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 0.85;
+    letter-spacing: -0.04em;
+    margin-bottom: 3vh;
+  }
+  .display.warning { color: #ffd54f; }
+  .display.danger { color: #ff5252; }
+  .controls {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 1vh 1vw;
+    margin-bottom: 2.5vh;
+    width: 90vw;
+    max-width: 900px;
+  }
+  .btn {
+    background: #1c1c1c;
+    color: #fff;
+    border: 2px solid #3a3a3a;
+    border-radius: 12px;
+    font-size: 4vh;
+    font-weight: 600;
+    padding: 3vh 0;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .btn:active { background: #2a2a2a; transform: scale(0.97); }
+  .btn.primary { background: #0a8f5a; border-color: #0a8f5a; }
+  .btn.danger { background: #b33; border-color: #b33; }
+  .adjust {
+    display: flex;
+    gap: 1.5vw;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .adjust .btn { padding: 3vh 3vw; min-width: 16vw; }
+  body.flash { animation: flash 0.6s infinite; }
+  @keyframes flash {
+    0%, 100% { background: #000; }
+    50% { background: #c33; }
+  }
+</style>
+</head>
+<body>
+  <div class="display" id="display">00:00</div>
+  <div class="controls" id="presets">
+    <button class="btn" data-min="1">1分</button>
+    <button class="btn" data-min="2">2分</button>
+    <button class="btn" data-min="3">3分</button>
+    <button class="btn" data-min="4">4分</button>
+    <button class="btn" data-min="5">5分</button>
+    <button class="btn" data-min="6">6分</button>
+    <button class="btn" data-min="7">7分</button>
+    <button class="btn" data-min="8">8分</button>
+    <button class="btn" data-min="9">9分</button>
+    <button class="btn" data-min="10">10分</button>
+  </div>
+  <div class="adjust">
+    <button class="btn" id="minus">-1分</button>
+    <button class="btn primary" id="startPause">スタート</button>
+    <button class="btn" id="plus">+1分</button>
+    <button class="btn danger" id="reset">リセット</button>
+  </div>
+
+<script>
+(function() {
+  let remainingMs = 0;
+  let running = false;
+  let lastTick = 0;
+  let rafId = null;
+  let wakeLock = null;
+  let audioCtx = null;
+  let alarmInterval = null;
+
+  const display = document.getElementById('display');
+  const startPauseBtn = document.getElementById('startPause');
+  const resetBtn = document.getElementById('reset');
+  const minusBtn = document.getElementById('minus');
+  const plusBtn = document.getElementById('plus');
+  const presets = document.getElementById('presets');
+
+  function format(ms) {
+    if (ms < 0) ms = 0;
+    const totalSec = Math.ceil(ms / 1000);
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+  }
+
+  function render() {
+    display.textContent = format(remainingMs);
+    display.classList.remove('warning', 'danger');
+    if (running && remainingMs > 0) {
+      if (remainingMs <= 10000) display.classList.add('danger');
+      else if (remainingMs <= 30000) display.classList.add('warning');
+    }
+  }
+
+  function tick(now) {
+    if (!running) return;
+    const dt = now - lastTick;
+    lastTick = now;
+    remainingMs -= dt;
+    if (remainingMs <= 0) {
+      remainingMs = 0;
+      running = false;
+      startPauseBtn.textContent = 'スタート';
+      render();
+      alarm();
+      return;
+    }
+    render();
+    rafId = requestAnimationFrame(tick);
+  }
+
+  function start() {
+    if (remainingMs <= 0) return;
+    running = true;
+    startPauseBtn.textContent = '一時停止';
+    lastTick = performance.now();
+    rafId = requestAnimationFrame(tick);
+    requestWakeLock();
+    ensureAudio();
+  }
+
+  function pause() {
+    running = false;
+    startPauseBtn.textContent = 'スタート';
+    if (rafId) cancelAnimationFrame(rafId);
+  }
+
+  function reset() {
+    running = false;
+    startPauseBtn.textContent = 'スタート';
+    if (rafId) cancelAnimationFrame(rafId);
+    remainingMs = 0;
+    stopAlarm();
+    render();
+  }
+
+  function setMinutes(min) {
+    if (rafId) cancelAnimationFrame(rafId);
+    stopAlarm();
+    remainingMs = min * 60 * 1000;
+    render();
+    start();
+  }
+
+  function ensureAudio() {
+    if (!audioCtx) {
+      try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {}
+    }
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  }
+
+  function beep() {
+    if (!audioCtx) return;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.frequency.value = 880;
+    osc.type = 'sine';
+    gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.45);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.45);
+  }
+
+  function alarm() {
+    document.body.classList.add('flash');
+    ensureAudio();
+    beep();
+    alarmInterval = setInterval(beep, 600);
+  }
+
+  function stopAlarm() {
+    if (alarmInterval) { clearInterval(alarmInterval); alarmInterval = null; }
+    document.body.classList.remove('flash');
+  }
+
+  async function requestWakeLock() {
+    try {
+      if ('wakeLock' in navigator && !wakeLock) {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+      }
+    } catch(e) {}
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && running) requestWakeLock();
+  });
+
+  startPauseBtn.addEventListener('click', () => {
+    if (alarmInterval) { stopAlarm(); return; }
+    if (running) pause(); else start();
+  });
+  resetBtn.addEventListener('click', reset);
+  minusBtn.addEventListener('click', () => {
+    remainingMs = Math.max(0, remainingMs - 60000);
+    render();
+  });
+  plusBtn.addEventListener('click', () => {
+    remainingMs += 60000;
+    render();
+    if (!running) start();
+  });
+  presets.addEventListener('click', (e) => {
+    const min = e.target.dataset.min;
+    if (min) setMinutes(Number(min));
+  });
+
+  document.addEventListener('click', () => {
+    if (alarmInterval) stopAlarm();
+  }, true);
+
+  document.addEventListener('click', ensureAudio, { once: true });
+  document.addEventListener('touchstart', ensureAudio, { once: true });
+
+  render();
+})();
+</script>
+</body>
+</html>
